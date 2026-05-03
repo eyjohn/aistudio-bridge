@@ -40,8 +40,9 @@ aistudio-proxy <APP_ID> --visual-overlay
 
 1. A Chrome window will open to your AI Studio App.
 2. If prompted, log in to your Google account.
-3. Wait for the terminal to show `[✓] BRIDGE INITIALIZATION COMPLETE`.
-4. Your session is now saved in `~/.aistudio-proxy/profile/`. Subsequent runs (including background services) will inherit this login.
+3. **Crucial**: Manually dismiss any "Welcome," "Cookies," or "Tour Guide" modals that appear in the browser. These can block the application bridge if left open.
+4. Wait for the terminal to show `[✓] BRIDGE INITIALIZATION COMPLETE`.
+5. Your session is now saved in `~/.aistudio-proxy/profile/`. Subsequent runs (including background services) will inherit this login.
 
 This creates `~/.aistudio-proxy/config.yaml` and initializes the Chrome profile in `~/.aistudio-proxy/profile/`.
 
