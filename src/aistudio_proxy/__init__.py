@@ -441,13 +441,6 @@ def main():
 
     args = parser.parse_args()
 
-    if args.install:
-        manage_service(install=True)
-        return
-    if args.uninstall:
-        manage_service(install=False)
-        return
-
     DEFAULT_HOME.mkdir(parents=True, exist_ok=True)
     config_path = DEFAULT_HOME / "config.yaml"
     
@@ -464,6 +457,15 @@ def main():
 
     with open(config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False)
+
+    if args.install:
+        if not config.get("app_id"):
+            parser.error("app_id is required to install the service.")
+        manage_service(install=True)
+        return
+    if args.uninstall:
+        manage_service(install=False)
+        return
 
     if args.config:
         print(yaml.dump(config, default_flow_style=False))
