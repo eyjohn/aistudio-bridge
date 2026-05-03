@@ -65,14 +65,14 @@ Simply point your API clients to `http://localhost:8080`.
 
 **Standard Request:**
 ```bash
-curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-flash-lite-latest:generateContent?key=MY_API_KEY \
+curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-flash-lite-latest:generateContent?key=MY_GEMINI_API_KEY \
     -H 'Content-Type: application/json' \
     -d '{"contents":[{"parts":[{"text":"Explain proxy streaming in 5 words."}]}]}'
 ```
 
 **SSE Stream Request:**
 ```bash
-curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?key=MY_API_KEY\&alt=sse \
+curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?key=MY_GEMINI_API_KEY\&alt=sse \
     -H 'Content-Type: application/json' \
     -d '{"contents":[{"parts":[{"text":"Print 10 paragraphs of lorum ipsum."}]}]}'
 ```
