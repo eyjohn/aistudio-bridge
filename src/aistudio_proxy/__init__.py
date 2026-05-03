@@ -17,7 +17,7 @@ from aiohttp import web
 
 CHROME_PATH = "google-chrome"
 DEBUG_PORT = 9222
-PROXY_PORT = 8080
+DEFAULT_PORT = 8080
 DEFAULT_HOME = Path.home() / ".aistudio-proxy"
 
 VISUALIZER_JS = """
@@ -176,23 +176,31 @@ class ChromeBridge:
             f"--app={self.target_url}"
         ]
         
-        print("Launching Chrome...")
-        subprocess.Popen([self.chrome_binary] + flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) 
+        print(f"Launching Chrome from: {self.chrome_binary}")
+        try:
+            subprocess.Popen([self.chrome_binary] + flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) 
+        except Exception as e:
+            print(f"[!] FAILED TO LAUNCH CHROME: {e}")
+            raise
         
+        print(f"Waiting for Chrome CDP on port {DEBUG_PORT}...")
         ws_url = None
-        for _ in range(30):
+        for i in range(30):
             try:
                 req = urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json")
                 pages = json.loads(req.read())
                 page = next(p for p in pages if p["type"] == "page" and ("aistudio" in p["url"] or p["url"] == "about:blank"))
                 ws_url = page["webSocketDebuggerUrl"]
+                print(f"Connected to Chrome CDP: {ws_url}")
                 break
             except Exception:
+                if i % 5 == 0: print(f"Still waiting for CDP... ({i}/30)")
                 await asyncio.sleep(1)
         
         if not ws_url: 
-            raise Exception("Failed to find websocket URL")
+            raise Exception(f"Failed to find websocket URL on port {DEBUG_PORT}. Is Chrome running?")
 
+        print("Establishing WebSocket connection...")
         self.ws = await websockets.connect(ws_url, ping_interval=None)
 
         await self._send_cmd("Runtime.enable")
@@ -208,6 +216,33 @@ class ChromeBridge:
         asyncio.create_task(self._listener())
 
         await self._send_cmd("Page.navigate", {"url": self.target_url})
+        
+        # 1. Proactive Auth Detection
+        auth_warning_shown = False
+        while True:
+            # Check current URL via Runtime.evaluate
+            eval_id = await self._send_cmd("Runtime.evaluate", {"expression": "window.location.href"})
+            future = asyncio.Future()
+            self.pending_evals[eval_id] = future
+            try:
+                res = await asyncio.wait_for(future, timeout=2.0)
+                current_url = res.get("result", {}).get("result", {}).get("value", "")
+                if "accounts.google.com" in current_url:
+                    if not auth_warning_shown:
+                        print("\n" + "!"*60)
+                        print("[!] AUTHENTICATION REQUIRED: Please log in in the Chrome window.")
+                        print("!"*60 + "\n")
+                        await self._send_cmd("Page.bringToFront")
+                        auth_warning_shown = True
+                    await self._set_hud("LOGIN REQUIRED")
+                elif self.app_id in current_url:
+                    break
+            except:
+                pass
+            finally:
+                self.pending_evals.pop(eval_id, None)
+            await asyncio.sleep(2)
+
         await self._set_hud("WAITING FOR OOPIF...")
 
         try:
@@ -225,15 +260,15 @@ class ChromeBridge:
         await self._send_cmd("Runtime.addBinding", {"name": "__stream_meta"}, session_id=self.target_sid)
         await self._send_cmd("Runtime.addBinding", {"name": "__stream_chunk"}, session_id=self.target_sid)
 
-        # 1. Start the mouse jiggler in fast mode to quickly unblock the UI
+        # 2. Start the mouse jiggler in fast mode to quickly unblock the UI
         self.proxy_ready = False
         self.keep_alive_task = asyncio.create_task(self._mouse_jiggler())
 
-        # 2. Fire the ping and wait for it to succeed
+        # 3. Fire the ping and wait for it to succeed
         await self._set_hud("WAITING ON PING...")
         ping_js = "fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest?key=MY_GEMINI_API_KEY').then(r => r.status).catch(e => -1)"
         
-        for _ in range(60):  # Wait up to ~2 mins
+        for _ in range(120):  # Wait up to ~4 mins
             eval_id = await self._send_cmd("Runtime.evaluate", {
                 "expression": ping_js,
                 "awaitPromise": True,
@@ -245,13 +280,19 @@ class ChromeBridge:
             try:
                 res = await asyncio.wait_for(future, timeout=5.0)
                 val = res.get("result", {}).get("result", {}).get("value")
-                if val and val != -1:
+                
+                if val == 401 or val == 403:
+                    await self._set_hud("PING: AUTH ERROR", success=False)
+                    if not auth_warning_shown:
+                        print("\n[!] PING FAILED (Auth Error). Your session might have expired. Please refresh/login in Chrome.")
+                        auth_warning_shown = True
+                elif val and val != -1:
                     break
             except asyncio.TimeoutError:
                 pass
             finally:
                 self.pending_evals.pop(eval_id, None)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
         self.proxy_ready = True
         await self._set_hud("PROXY READY.", success=True)
@@ -382,19 +423,47 @@ class ProxyServer:
         finally:
             self.bridge.streams.pop(req_id, None)
 
-    async def start(self):
+    async def start(self, port: int):
         app = web.Application()
         app.router.add_route('*', '/{path_info:.*}', self.handle_request)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', PROXY_PORT)
+        site = web.TCPSite(runner, '0.0.0.0', port)
         await site.start()
-        print(f"HTTP Reverse Proxy listening on http://0.0.0.0:{PROXY_PORT}")
+        print(f"HTTP Reverse Proxy listening on http://0.0.0.0:{port}")
         print(f"Forwarding all relative paths to: {self.target_base}")
 
+import shutil
+
 def get_service_file():
-    exec_path = sys.argv[0]
-    return f"""[Unit]
+    cwd = os.getcwd()
+    is_dev = (Path(cwd) / "pyproject.toml").exists()
+    uv_path = shutil.which("uv") or "uv"
+    
+    # Capture current display environment to make the background service work
+    display = os.environ.get("DISPLAY")
+    wayland = os.environ.get("WAYLAND_DISPLAY")
+    env_lines = ""
+    if display: env_lines += f"Environment=DISPLAY={display}\n"
+    if wayland: env_lines += f"Environment=WAYLAND_DISPLAY={wayland}\n"
+    
+    if is_dev:
+        return f"""[Unit]
+Description=AI Studio Streaming Proxy (Dev)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={cwd}
+ExecStart={uv_path} run aistudio-proxy
+Restart=always
+{env_lines}
+[Install]
+WantedBy=default.target
+"""
+    else:
+        exec_path = sys.argv[0]
+        return f"""[Unit]
 Description=AI Studio Streaming Proxy
 After=network.target
 
@@ -402,8 +471,7 @@ After=network.target
 Type=simple
 ExecStart={exec_path}
 Restart=always
-Environment=DISPLAY=:0
-
+{env_lines}
 [Install]
 WantedBy=default.target
 """
@@ -430,6 +498,7 @@ def manage_service(install=True):
 def main():
     parser = argparse.ArgumentParser(description="AISTUDIO Chrome Fetch Proxy")
     parser.add_argument("app_id", nargs="?", help="The App ID UUID")
+    parser.add_argument("--port", type=int, help=f"Proxy port (default: {DEFAULT_PORT})")
     parser.add_argument("--profile-dir", help="Absolute path to the Chrome profile directory")
     parser.add_argument("--visual-overlay", action="store_true", help="Enable the HUD status badge")
     parser.add_argument("--chrome-binary", default="google-chrome", help="Path to the Chrome binary")
@@ -450,6 +519,7 @@ def main():
             config = yaml.safe_load(f) or {}
 
     if args.app_id: config["app_id"] = args.app_id
+    if args.port: config["port"] = args.port
     if args.profile_dir: config["profile_dir"] = args.profile_dir
     if args.chrome_binary: config["chrome_binary"] = args.chrome_binary
     if args.target_api: config["target_api"] = args.target_api
@@ -473,6 +543,7 @@ def main():
 
     app_id = config.get("app_id")
     profile_dir = config.get("profile_dir") or str(DEFAULT_HOME / "profile")
+    port = config.get("port") or DEFAULT_PORT
     
     if not app_id:
         parser.error("app_id is required (via argument or config.yaml)")
@@ -481,7 +552,7 @@ def main():
         bridge = ChromeBridge(app_id, profile_dir, config["visual_overlay"], config.get("chrome_binary", "google-chrome"))
         await bridge.launch()
         server = ProxyServer(bridge, config.get("target_api", "https://generativelanguage.googleapis.com"))
-        await server.start()
+        await server.start(port)
         while True: await asyncio.sleep(3600)
 
     try:

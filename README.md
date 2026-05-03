@@ -25,15 +25,21 @@ pipx install .
 
 ### 1. Obtain an App ID
 1. Navigate to [AI Studio Apps](https://aistudio.google.com/apps).
-2. Create a new application.
+2. Create a new application. 
+    > **Note**: The "body" or logic of the app (the prompt, model settings, etc.) is completely irrelevant. The app simply provides an authenticated execution environment for the proxy to tunnel through.
 3. Copy the UUID from the browser URL.
 
-### 2. Initial Setup
-Run the proxy once with your App ID to save the configuration:
+### 2. Initial Setup (Authentication)
+The first time you run the proxy, you **must** log in to your Google account in the Chrome window that appears.
 
 ```bash
 aistudio-proxy <APP_ID> --visual-overlay
 ```
+
+1. A Chrome window will open to your AI Studio App.
+2. If prompted, log in to your Google account.
+3. Wait for the terminal to show `[✓] BRIDGE INITIALIZATION COMPLETE`.
+4. Your session is now saved in `~/.aistudio-proxy/profile/`. Subsequent runs (including background services) will inherit this login.
 
 This creates `~/.aistudio-proxy/config.yaml` and initializes the Chrome profile in `~/.aistudio-proxy/profile/`.
 
