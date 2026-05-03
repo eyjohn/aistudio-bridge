@@ -12,14 +12,18 @@ By providing a local endpoint that tunnels requests through a secure browser ses
 
 ## Installation
 
-We recommend using `pipx` for a clean, global installation:
+The easiest way to install the bridge is via `pipx`:
 
 ```bash
-# Clone the repo
+pipx install aistudio-bridge
+```
+
+### From Source (Development)
+If you want to contribute or run the latest dev version:
+
+```bash
 git clone https://github.com/eyjohn/aistudio-bridge
 cd aistudio-bridge
-
-# Install globally
 pipx install .
 ```
 
