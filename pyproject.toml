@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aistudio-proxy"
+version = "0.1.0"
+description = "Automated bridge initializer for Gemini AI Studio"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "aiohttp>=3.13.5",
+    "websockets",
+]
+
+[project.scripts]
+aistudio-proxy = "aistudio_proxy:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aistudio_proxy.py"]
