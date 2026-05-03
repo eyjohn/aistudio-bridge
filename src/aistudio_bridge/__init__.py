@@ -454,6 +454,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory={cwd}
+Environment=PYTHONUNBUFFERED=1
 ExecStart={uv_path} run aistudio-bridge
 Restart=always
 {env_lines}
@@ -468,6 +469,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=PYTHONUNBUFFERED=1
 ExecStart={exec_path}
 Restart=always
 {env_lines}
