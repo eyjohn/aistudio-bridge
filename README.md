@@ -1,14 +1,14 @@
-# aistudio-proxy
+# aistudio-bridge
 
-`aistudio-proxy` is a developer tool designed to bridge the gap between the Google AI Studio web environment and your local development workflow. It enables developers to iterate locally in their preferred IDEs and tools while leveraging the [authenticated execution environment and increased usage limits](https://blog.google/innovation-and-ai/technology/developers-tools/google-one-ai-studio/) provided to AI Studio users.
+`aistudio-bridge` is a developer tool designed to bridge the gap between the Google AI Studio web environment and your local development workflow. It enables developers to iterate locally in their preferred IDEs and tools while leveraging the [authenticated execution environment and increased usage limits](https://blog.google/innovation-and-ai/technology/developers-tools/google-one-ai-studio/) provided to AI Studio users.
 
-By providing a local endpoint that tunnels requests through a secure browser session, `aistudio-proxy` allows you to maintain the benefits of the AI Studio ecosystem while working in a native local environment.
+By providing a local endpoint that tunnels requests through a secure browser session, `aistudio-bridge` allows you to maintain the benefits of the AI Studio ecosystem while working in a native local environment.
 
 ## Features
 - **Drop-in Reverse Proxy**: Listens on `http://localhost:8080`.
 - **Native SSE Streaming**: Real-time chunking via CDP bindings.
 - **Systemd Integration**: Easy userspace service installation.
-- **Persistent Config**: Managed via `~/.aistudio-proxy/config.yaml`.
+- **Persistent Config**: Managed via `~/.aistudio-bridge/config.yaml`.
 
 ## Installation
 
@@ -16,8 +16,8 @@ We recommend using `pipx` for a clean, global installation:
 
 ```bash
 # Clone the repo
-git clone https://github.com/eyjohn/aistudio-proxy
-cd aistudio-proxy
+git clone https://github.com/eyjohn/aistudio-bridge
+cd aistudio-bridge
 
 # Install globally
 pipx install .
@@ -32,32 +32,32 @@ pipx install .
 3. Copy the UUID from the browser URL.
 
 ### 2. Initial Setup (Authentication)
-The first time you run the proxy, you **must** log in to your Google account in the Chrome window that appears.
+The first time you run the bridge, you **must** log in to your Google account in the Chrome window that appears.
 
 ```bash
-aistudio-proxy <APP_ID> --visual-overlay
+aistudio-bridge <APP_ID> --visual-overlay
 ```
 
 1. A Chrome window will open to your AI Studio App.
 2. If prompted, log in to your Google account.
 3. **Crucial**: Manually dismiss any "Welcome," "Cookies," or "Tour Guide" modals that appear in the browser. These can block the application bridge if left open.
 4. Wait for the terminal to show `[✓] BRIDGE INITIALIZATION COMPLETE`.
-5. Your session is now saved in `~/.aistudio-proxy/profile/`. Subsequent runs (including background services) will inherit this login.
+5. Your session is now saved in `~/.aistudio-bridge/profile/`. Subsequent runs (including background services) will inherit this login.
 
-This creates `~/.aistudio-proxy/config.yaml` and initializes the Chrome profile in `~/.aistudio-proxy/profile/`.
+This creates `~/.aistudio-bridge/config.yaml` and initializes the Chrome profile in `~/.aistudio-bridge/profile/`.
 
 ### 3. Background Service (Linux)
-To keep the proxy running as a background service:
+To keep the bridge running as a background service:
 
 ```bash
 # Install the systemd user service
-aistudio-proxy --install
+aistudio-bridge --install
 
 # Check status
-systemctl --user status aistudio-proxy
+systemctl --user status aistudio-bridge
 
 # Stop/Remove service
-aistudio-proxy --uninstall
+aistudio-bridge --uninstall
 ```
 
 ## Connecting your apps
@@ -78,11 +78,12 @@ curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-3.1-pro-preview:streamGe
 ```
 
 ## Configuration
-Settings are stored in `~/.aistudio-proxy/config.yaml`. You can edit this file manually or update it via CLI arguments.
+Settings are stored in `~/.aistudio-bridge/config.yaml`. You can edit this file manually or update it via CLI arguments.
 
 ```yaml
 app_id: your-uuid-here
 visual_overlay: true
 chrome_binary: google-chrome
 target_api: https://generativelanguage.googleapis.com
+port: 8080
 ```

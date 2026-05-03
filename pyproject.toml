@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "aistudio-proxy"
+name = "aistudio-bridge"
 version = "0.1.0"
-description = "Automated bridge initializer for Gemini AI Studio"
+description = "Bridge the gap between Google AI Studio and local workflows"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-aistudio-proxy = "aistudio_proxy:main"
+aistudio-bridge = "aistudio_bridge:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aistudio_proxy"]
+packages = ["src/aistudio_bridge"]

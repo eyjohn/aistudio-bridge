@@ -11,6 +11,7 @@ import base64
 import uuid
 import sys
 import yaml
+import shutil
 from pathlib import Path
 from datetime import datetime
 from aiohttp import web
@@ -18,7 +19,7 @@ from aiohttp import web
 CHROME_PATH = "google-chrome"
 DEBUG_PORT = 9222
 DEFAULT_PORT = 8080
-DEFAULT_HOME = Path.home() / ".aistudio-proxy"
+DEFAULT_HOME = Path.home() / ".aistudio-bridge"
 
 VISUALIZER_JS = """
 (function() {
@@ -433,8 +434,6 @@ class ProxyServer:
         print(f"HTTP Reverse Proxy listening on http://0.0.0.0:{port}")
         print(f"Forwarding all relative paths to: {self.target_base}")
 
-import shutil
-
 def get_service_file():
     cwd = os.getcwd()
     is_dev = (Path(cwd) / "pyproject.toml").exists()
@@ -449,13 +448,13 @@ def get_service_file():
     
     if is_dev:
         return f"""[Unit]
-Description=AI Studio Streaming Proxy (Dev)
+Description=AI Studio Streaming Bridge (Dev)
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory={cwd}
-ExecStart={uv_path} run aistudio-proxy
+ExecStart={uv_path} run aistudio-bridge
 Restart=always
 {env_lines}
 [Install]
@@ -464,7 +463,7 @@ WantedBy=default.target
     else:
         exec_path = sys.argv[0]
         return f"""[Unit]
-Description=AI Studio Streaming Proxy
+Description=AI Studio Streaming Bridge
 After=network.target
 
 [Service]
@@ -478,25 +477,25 @@ WantedBy=default.target
 
 def manage_service(install=True):
     svc_dir = Path.home() / ".config" / "systemd" / "user"
-    svc_file = svc_dir / "aistudio-proxy.service"
+    svc_file = svc_dir / "aistudio-bridge.service"
     
     if install:
         svc_dir.mkdir(parents=True, exist_ok=True)
         svc_file.write_text(get_service_file())
         subprocess.run(["systemctl", "--user", "daemon-reload"])
-        subprocess.run(["systemctl", "--user", "enable", "aistudio-proxy.service"])
-        subprocess.run(["systemctl", "--user", "restart", "aistudio-proxy.service"])
+        subprocess.run(["systemctl", "--user", "enable", "aistudio-bridge.service"])
+        subprocess.run(["systemctl", "--user", "restart", "aistudio-bridge.service"])
         print(f"[✓] Service installed and started at {svc_file}")
-        print("Use 'systemctl --user status aistudio-proxy' to check status.")
+        print("Use 'systemctl --user status aistudio-bridge' to check status.")
     else:
-        subprocess.run(["systemctl", "--user", "stop", "aistudio-proxy.service"])
-        subprocess.run(["systemctl", "--user", "disable", "aistudio-proxy.service"])
+        subprocess.run(["systemctl", "--user", "stop", "aistudio-bridge.service"])
+        subprocess.run(["systemctl", "--user", "disable", "aistudio-bridge.service"])
         if svc_file.exists():
             svc_file.unlink()
         print("[✓] Service stopped and removed.")
 
 def main():
-    parser = argparse.ArgumentParser(description="AISTUDIO Chrome Fetch Proxy")
+    parser = argparse.ArgumentParser(description="AI Studio Streaming Bridge")
     parser.add_argument("app_id", nargs="?", help="The App ID UUID")
     parser.add_argument("--port", type=int, help=f"Proxy port (default: {DEFAULT_PORT})")
     parser.add_argument("--profile-dir", help="Absolute path to the Chrome profile directory")
