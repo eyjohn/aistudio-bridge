@@ -1,6 +1,8 @@
 # aistudio-proxy
 
-A fully functional, headless Chrome-based HTTP reverse proxy for the Google Gemini API. `aistudio-proxy` routes local API traffic through an authenticated Google AI Studio browser session.
+`aistudio-proxy` is a developer tool designed to bridge the gap between the Google AI Studio web environment and your local development workflow. It enables developers to iterate locally in their preferred IDEs and tools while leveraging the [authenticated execution environment and increased usage limits](https://blog.google/innovation-and-ai/technology/developers-tools/google-one-ai-studio/) provided to AI Studio users.
+
+By providing a local endpoint that tunnels requests through a secure browser session, `aistudio-proxy` allows you to maintain the benefits of the AI Studio ecosystem while working in a native local environment.
 
 ## Features
 - **Drop-in Reverse Proxy**: Listens on `http://localhost:8080`.
