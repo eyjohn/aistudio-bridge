@@ -1,61 +1,79 @@
 # aistudio-proxy
 
-A fully functional, headless Chrome-based HTTP reverse proxy for the Google Gemini API. `aistudio-proxy` routes local API traffic through an authenticated Google AI Studio browser session, allowing you to inherit the browser's active session state, auth tokens, and network bypasses. 
+A fully functional, headless Chrome-based HTTP reverse proxy for the Google Gemini API. `aistudio-proxy` routes local API traffic through an authenticated Google AI Studio browser session.
 
 ## Features
-- **Drop-in Reverse Proxy**: Listens on `http://localhost:8080` and transparently forwards all traffic (e.g. `/v1beta/models/...`) to the Gemini API (`https://generativelanguage.googleapis.com`) through the browser.
-- **Native SSE Streaming**: Fully supports Server-Sent Events (SSE) streaming out of the box. It uses Javascript's `ReadableStream.getReader()` to chunk response data and pipes it back to Python in real-time via high-speed CDP (Chrome DevTools Protocol) bindings.
-- **OOPIF Targeting**: Intelligently searches for and attaches to the specific Out-of-Process Iframe (OOPIF) running the AI Studio network layer.
-- **Anti-Idle Mouse Jiggler**: Runs a continuous, asynchronous background task to dispatch mouse movements and clicks, keeping the AI Studio session alive and preventing the iframe's network activity from sleeping.
-- **Visual HUD**: Optional `--visual-overlay` flag injects a real-time status UI and ghost cursor directly into the Chrome window so you can monitor proxy health and mouse jiggler activity.
+- **Drop-in Reverse Proxy**: Listens on `http://localhost:8080`.
+- **Native SSE Streaming**: Real-time chunking via CDP bindings.
+- **Systemd Integration**: Easy userspace service installation.
+- **Persistent Config**: Managed via `~/.aistudio-proxy/config.yaml`.
 
 ## Installation
 
-This project uses `uv` for dependency management.
+We recommend using `pipx` for a clean, global installation:
 
 ```bash
-uv sync
+# Clone the repo
+git clone https://github.com/youruser/aistudio-proxy
+cd aistudio-proxy
+
+# Install globally
+pipx install .
 ```
 
 ## Usage
 
 ### 1. Obtain an App ID
 1. Navigate to [AI Studio Apps](https://aistudio.google.com/apps).
-2. Create a new application. The specific functionality or prompt of the app does not matter for the proxy's operation; it simply serves as the execution environment.
-3. Once the app is created, copy the unique UUID from the browser's address bar.
+2. Create a new application.
+3. Copy the UUID from the browser URL.
 
-### 2. Start the proxy server
+### 2. Initial Setup
+Run the proxy once with your App ID to save the configuration:
 
 ```bash
-uv run aistudio-proxy <APP_ID> \
-  --profile-dir /path/to/your/.chrome_profile \
-  --visual-overlay \
-  --chrome-binary google-chrome
+aistudio-proxy <APP_ID> --visual-overlay
 ```
 
-*Wait for the terminal to display `[✓] BRIDGE INITIALIZATION COMPLETE. PROXY READY.`*
+This creates `~/.aistudio-proxy/config.yaml` and initializes the Chrome profile in `~/.aistudio-proxy/profile/`.
 
-### Connecting your apps
-Once the proxy is running, simply point your API clients, SDKs, or `curl` commands to `http://localhost:8080`. 
+### 3. Background Service (Linux)
+To keep the proxy running as a background service:
 
-**Example (Standard Request):**
+```bash
+# Install the systemd user service
+aistudio-proxy --install
+
+# Check status
+systemctl --user status aistudio-proxy
+
+# Stop/Remove service
+aistudio-proxy --uninstall
+```
+
+## Connecting your apps
+Simply point your API clients to `http://localhost:8080`.
+
+**Standard Request:**
 ```bash
 curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-flash-lite-latest:generateContent?key=MY_API_KEY \
     -H 'Content-Type: application/json' \
     -d '{"contents":[{"parts":[{"text":"Explain proxy streaming in 5 words."}]}]}'
 ```
 
-**Example (SSE Stream Request):**
+**SSE Stream Request:**
 ```bash
 curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?key=MY_API_KEY\&alt=sse \
     -H 'Content-Type: application/json' \
     -d '{"contents":[{"parts":[{"text":"Print 10 paragraphs of lorum ipsum."}]}]}'
 ```
 
-## Architecture
+## Configuration
+Settings are stored in `~/.aistudio-proxy/config.yaml`. You can edit this file manually or update it via CLI arguments.
 
-1. **Python `aiohttp` Server**: Accepts incoming HTTP traffic on port 8080.
-2. **Chrome CDP Bridge**: Python communicates with Chrome via WebSockets. It translates the incoming request into a Javascript `fetch()` call.
-3. **Stream Bindings**: For streaming requests, the JS uses a `reader` loop and passes base64-encoded chunks back to Python synchronously via `Runtime.addBinding`.
-4. **Proxy Response**: Python decodes the chunks and writes them directly to the `aiohttp` `StreamResponse`, maintaining exact SSE compatibility with zero buffering.
-
+```yaml
+app_id: your-uuid-here
+visual_overlay: true
+chrome_binary: google-chrome
+target_api: https://generativelanguage.googleapis.com
+```

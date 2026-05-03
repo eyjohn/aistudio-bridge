@@ -11,10 +11,11 @@ requires-python = ">=3.9"
 dependencies = [
     "aiohttp>=3.13.5",
     "websockets",
+    "PyYAML",
 ]
 
 [project.scripts]
 aistudio-proxy = "aistudio_proxy:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aistudio_proxy.py"]
+packages = ["src/aistudio_proxy"]

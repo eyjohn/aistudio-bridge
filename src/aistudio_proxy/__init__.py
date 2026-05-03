@@ -9,12 +9,16 @@ import websockets
 import random
 import base64
 import uuid
+import sys
+import yaml
+from pathlib import Path
 from datetime import datetime
 from aiohttp import web
 
 CHROME_PATH = "google-chrome"
 DEBUG_PORT = 9222
 PROXY_PORT = 8080
+DEFAULT_HOME = Path.home() / ".aistudio-proxy"
 
 VISUALIZER_JS = """
 (function() {
@@ -135,6 +139,7 @@ class ChromeBridge:
         self.pending_evals = {}
         self.oopif_ready = asyncio.Event()
         self.keep_alive_task = None
+        self.proxy_ready = False
         
         # Streams registry
         self.streams = {}  # reqId -> {"meta": Future, "queue": Queue}
@@ -328,7 +333,6 @@ class ProxyServer:
         self.target_base = target_base.rstrip('/')
 
     async def handle_request(self, request: web.Request):
-        # Always act as a reverse proxy prepending the target base
         url = f"{self.target_base}{request.path_qs}"
         method = request.method
         
@@ -347,24 +351,18 @@ class ProxyServer:
         
         try:
             meta_future, chunk_queue = await self.bridge.execute_fetch_stream(url, method, headers, body_text, req_id)
-            
-            # Wait for response headers (with a timeout in case of fetch failure)
             meta = await asyncio.wait_for(meta_future, timeout=30.0)
             
             if "error" in meta:
                 return web.Response(status=500, text=f"Proxy Fetch Error: {meta['error']}")
                 
             resp_headers = meta.get("headers", {})
-            # Remove problematic hop-by-hop headers
             if "content-encoding" in resp_headers:
                 del resp_headers["content-encoding"]
             if "transfer-encoding" in resp_headers:
                 del resp_headers["transfer-encoding"]
 
-            response = web.StreamResponse(
-                status=meta.get("status", 200),
-                headers=resp_headers
-            )
+            response = web.StreamResponse(status=meta.get("status", 200), headers=resp_headers)
             await response.prepare(request)
             
             while True:
@@ -380,8 +378,6 @@ class ProxyServer:
         except asyncio.TimeoutError:
             return web.Response(status=504, text="Gateway Timeout: Fetch took too long to resolve headers.")
         except Exception as e:
-            import traceback
-            traceback.print_exc()
             return web.Response(status=500, text=f"Proxy Exception: {str(e)}")
         finally:
             self.bridge.streams.pop(req_id, None)
@@ -389,7 +385,6 @@ class ProxyServer:
     async def start(self):
         app = web.Application()
         app.router.add_route('*', '/{path_info:.*}', self.handle_request)
-        
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', PROXY_PORT)
@@ -397,29 +392,98 @@ class ProxyServer:
         print(f"HTTP Reverse Proxy listening on http://0.0.0.0:{PROXY_PORT}")
         print(f"Forwarding all relative paths to: {self.target_base}")
 
+def get_service_file():
+    exec_path = sys.argv[0]
+    return f"""[Unit]
+Description=AI Studio Streaming Proxy
+After=network.target
 
-async def run_app(app_id: str, profile_dir: str, use_visuals: bool, chrome_binary: str, target_api: str):
-    bridge = ChromeBridge(app_id, profile_dir, use_visuals, chrome_binary)
-    await bridge.launch()
+[Service]
+Type=simple
+ExecStart={exec_path}
+Restart=always
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=default.target
+"""
+
+def manage_service(install=True):
+    svc_dir = Path.home() / ".config" / "systemd" / "user"
+    svc_file = svc_dir / "aistudio-proxy.service"
     
-    server = ProxyServer(bridge, target_api)
-    await server.start()
-    
-    while True:
-        await asyncio.sleep(3600)
+    if install:
+        svc_dir.mkdir(parents=True, exist_ok=True)
+        svc_file.write_text(get_service_file())
+        subprocess.run(["systemctl", "--user", "daemon-reload"])
+        subprocess.run(["systemctl", "--user", "enable", "aistudio-proxy.service"])
+        subprocess.run(["systemctl", "--user", "restart", "aistudio-proxy.service"])
+        print(f"[✓] Service installed and started at {svc_file}")
+        print("Use 'systemctl --user status aistudio-proxy' to check status.")
+    else:
+        subprocess.run(["systemctl", "--user", "stop", "aistudio-proxy.service"])
+        subprocess.run(["systemctl", "--user", "disable", "aistudio-proxy.service"])
+        if svc_file.exists():
+            svc_file.unlink()
+        print("[✓] Service stopped and removed.")
 
 def main():
-    parser = argparse.ArgumentParser(description="AISTUDIO Chrome Fetch Proxy (Streaming Support)")
-    parser.add_argument("app_id", help="The App ID UUID (e.g. d1b98282-0b1d-4aa8-95a3-bfbe294639fd)")
-    parser.add_argument("--profile-dir", required=True, help="Absolute path to the Chrome profile directory")
-    parser.add_argument("--visual-overlay", action="store_true", help="Enable the HUD status badge and ghost cursor")
+    parser = argparse.ArgumentParser(description="AISTUDIO Chrome Fetch Proxy")
+    parser.add_argument("app_id", nargs="?", help="The App ID UUID")
+    parser.add_argument("--profile-dir", help="Absolute path to the Chrome profile directory")
+    parser.add_argument("--visual-overlay", action="store_true", help="Enable the HUD status badge")
     parser.add_argument("--chrome-binary", default="google-chrome", help="Path to the Chrome binary")
     parser.add_argument("--target-api", default="https://generativelanguage.googleapis.com", help="Target API Base URL")
     
+    parser.add_argument("--install", action="store_true", help="Install as systemd user service")
+    parser.add_argument("--uninstall", action="store_true", help="Uninstall systemd user service")
+    parser.add_argument("--config", action="store_true", help="Show current config and exit")
+
     args = parser.parse_args()
+
+    if args.install:
+        manage_service(install=True)
+        return
+    if args.uninstall:
+        manage_service(install=False)
+        return
+
+    DEFAULT_HOME.mkdir(parents=True, exist_ok=True)
+    config_path = DEFAULT_HOME / "config.yaml"
     
+    config = {}
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f) or {}
+
+    if args.app_id: config["app_id"] = args.app_id
+    if args.profile_dir: config["profile_dir"] = args.profile_dir
+    if args.chrome_binary: config["chrome_binary"] = args.chrome_binary
+    if args.target_api: config["target_api"] = args.target_api
+    config["visual_overlay"] = args.visual_overlay or config.get("visual_overlay", False)
+
+    with open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+    if args.config:
+        print(yaml.dump(config, default_flow_style=False))
+        return
+
+    app_id = config.get("app_id")
+    profile_dir = config.get("profile_dir") or str(DEFAULT_HOME / "profile")
+    
+    if not app_id:
+        parser.error("app_id is required (via argument or config.yaml)")
+
+    async def run():
+        bridge = ChromeBridge(app_id, profile_dir, config["visual_overlay"], config.get("chrome_binary", "google-chrome"))
+        await bridge.launch()
+        server = ProxyServer(bridge, config.get("target_api", "https://generativelanguage.googleapis.com"))
+        await server.start()
+        while True: await asyncio.sleep(3600)
+
     try:
-        asyncio.run(run_app(args.app_id, args.profile_dir, args.visual_overlay, args.chrome_binary, args.target_api))
+        asyncio.run(run())
     except KeyboardInterrupt:
         print("\nAborted.")
 
