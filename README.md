@@ -16,7 +16,7 @@ We recommend using `pipx` for a clean, global installation:
 
 ```bash
 # Clone the repo
-git clone https://github.com/youruser/aistudio-proxy
+git clone https://github.com/eyjohn/aistudio-proxy
 cd aistudio-proxy
 
 # Install globally
