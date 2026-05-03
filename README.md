@@ -19,7 +19,12 @@ uv sync
 
 ## Usage
 
-Start the proxy server:
+### 1. Obtain an App ID
+1. Navigate to [AI Studio Apps](https://aistudio.google.com/apps).
+2. Create a new application. The specific functionality or prompt of the app does not matter for the proxy's operation; it simply serves as the execution environment.
+3. Once the app is created, copy the unique UUID from the browser's address bar.
+
+### 2. Start the proxy server
 
 ```bash
 uv run aistudio-proxy <APP_ID> \
