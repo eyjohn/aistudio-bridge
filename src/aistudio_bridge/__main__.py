@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import importlib.metadata
 
 import yaml
 
@@ -9,8 +10,14 @@ from .service import manage_service
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AI Studio Streaming Bridge")
+    try:
+        version = importlib.metadata.version("aistudio-bridge")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+
+    parser = argparse.ArgumentParser(description=f"AI Studio Streaming Bridge v{version}")
     parser.add_argument("app_id", nargs="?", help="The App ID UUID")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {version}")
     parser.add_argument("--port", type=int, help=f"Proxy port (default: {DEFAULT_PORT})")
     parser.add_argument("--profile-dir", help="Absolute path to the Chrome profile directory")
     parser.add_argument("--visual-overlay", action="store_true", help="Enable the HUD status badge")
@@ -22,6 +29,7 @@ def main():
     parser.add_argument("--config", action="store_true", help="Show current config and exit")
 
     args = parser.parse_args()
+    print(f"[*] Starting AI Studio Streaming Bridge v{version}")
 
     DEFAULT_HOME.mkdir(parents=True, exist_ok=True)
     config_path = DEFAULT_HOME / "config.yaml"
