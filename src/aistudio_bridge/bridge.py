@@ -10,123 +10,15 @@ from pathlib import Path
 
 import websockets
 
+from .resources import get_asset
+
 DEBUG_PORT = 9222
 DEFAULT_PORT = 8080
 DEFAULT_HOME = Path.home() / ".aistudio-bridge"
 
-VISUALIZER_JS = """
-(function() {
-    const ID = 'viz-lifeline-badge';
-    const CURSOR_ID = 'viz-lifeline-cursor';
-
-    function ensureViz() {
-        if (!document.body || document.getElementById(ID)) return;
-        
-        const style = document.createElement('style');
-        style.textContent = `
-            #${ID} {
-                position: fixed !important; top: 10px !important; left: 10px !important; 
-                width: 250px !important; height: 50px !important;
-                background: rgba(255, 0, 0, 0.9) !important; 
-                color: #ffffff !important; 
-                font-family: 'Courier New', monospace !important;
-                z-index: 2147483647 !important; pointer-events: none !important;
-                display: flex !important; align-items: center !important;
-                justify-content: center !important; padding: 5px !important; 
-                font-size: 14px !important; font-weight: bold !important; 
-                border: 2px solid yellow !important; border-radius: 4px !important;
-                text-align: center !important;
-            }
-            #${CURSOR_ID} {
-                position: fixed !important; width: 30px !important; height: 30px !important;
-                border: 3px solid cyan !important; border-radius: 50% !important;
-                background: rgba(0, 255, 255, 0.3) !important;
-                z-index: 2147483646 !important; pointer-events: none !important;
-                transform: translate(-50%, -50%) !important;
-            }
-        `;
-        document.head.appendChild(style);
-
-        const badge = document.createElement('div');
-        badge.id = ID;
-        const textSpan = document.createElement('span');
-        textSpan.textContent = 'BRIDGE: STARTING...';
-        badge.appendChild(textSpan);
-        document.body.appendChild(badge);
-
-        const cursor = document.createElement('div');
-        cursor.id = CURSOR_ID;
-        document.body.appendChild(cursor);
-    }
-
-    if (window.trustedTypes && window.trustedTypes.createPolicy && !window.trustedTypes.defaultPolicy) {
-        try { window.trustedTypes.createPolicy('default', { createHTML: (s) => s, createScriptURL: (s) => s, createScript: (s) => s }); } catch (e) {}
-    }
-
-    setInterval(ensureViz, 500);
-    ensureViz();
-
-    window.__viz = {
-        update: (s, isSuccess=false) => { 
-            const el = document.querySelector(`#${ID} span`); 
-            const badge = document.getElementById(ID);
-            if (el) el.textContent = 'STATE: ' + s.toUpperCase(); 
-            if (isSuccess && badge) {
-                badge.style.background = 'rgba(0, 255, 0, 0.9)';
-                badge.style.color = '#000';
-            }
-        },
-        move: (x, y) => {
-            const el = document.getElementById(CURSOR_ID);
-            if (el) { el.style.left = x + 'px'; el.style.top = y + 'px'; }
-        }
-    };
-})();
-"""
-
-BRIDGE_FETCH_STREAM_JS_FUNC = """
-async function(url, method, headers, bodyText, reqId) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
-
-    try {
-        const fetchOptions = { method, signal: controller.signal };
-        if (headers && Object.keys(headers).length > 0) fetchOptions.headers = headers;
-        if (bodyText) fetchOptions.body = bodyText;
-
-        const res = await fetch(url, fetchOptions);
-        clearTimeout(timeoutId);
-
-        // Report status and headers
-        window.__stream_meta(JSON.stringify({
-            reqId: reqId,
-            status: res.status,
-            headers: Object.fromEntries(res.headers.entries())
-        }));
-
-        const reader = res.body.getReader();
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-                window.__stream_chunk(JSON.stringify({reqId: reqId, done: true}));
-                break;
-            }
-            // Convert binary chunk to base64
-            let binary = '';
-            for (let i = 0; i < value.byteLength; i++) {
-                binary += String.fromCharCode(value[i]);
-            }
-            window.__stream_chunk(JSON.stringify({reqId: reqId, chunk: btoa(binary)}));
-        }
-    } catch(e) {
-        clearTimeout(timeoutId);
-        window.__stream_meta(JSON.stringify({
-            reqId: reqId,
-            error: e.name === 'AbortError' ? 'Fetch timeout (60s)' : e.toString()
-        }));
-    }
-}
-"""
+# Loaded from assets
+VISUALIZER_JS = get_asset("visualizer.js")
+BRIDGE_FETCH_STREAM_JS_FUNC = get_asset("fetch_stream.js")
 
 
 class ChromeBridge:
@@ -302,7 +194,7 @@ class ChromeBridge:
 
         # 3. Fire the ping and wait for it to succeed
         await self._set_hud("WAITING ON PING...")
-        ping_js = "fetch('https://generativelanguage.googleapis.com/v1beta/models?key=MY_GEMINI_API_KEY').then(r => r.status).catch(e => -1)"
+        ping_js = get_asset("ping.js", GEMINI_API_KEY="MY_GEMINI_API_KEY")
 
         for _ in range(120):  # Wait up to ~4 mins
             eval_id = await self._send_cmd(
@@ -414,8 +306,10 @@ class ChromeBridge:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] [MAINTENANCE] Sending warmup ping...")
                 req_id = f"warmup-{uuid.uuid4()}"
                 try:
+                    # Use the same logic as init ping, but through the stream executor
+                    ping_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={'MY_GEMINI_API_KEY'}"
                     meta_fut, queue = await self.execute_fetch_stream(
-                        "https://generativelanguage.googleapis.com/v1beta/models?key=MY_GEMINI_API_KEY",
+                        ping_url,
                         "GET",
                         {},
                         None,
