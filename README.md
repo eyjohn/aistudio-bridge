@@ -81,13 +81,31 @@ curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-3.1-pro-preview:streamGe
     -d '{"contents":[{"parts":[{"text":"Print 10 paragraphs of lorum ipsum."}]}]}'
 ```
 
-## Configuration
-Settings are stored in `~/.aistudio-bridge/config.yaml`. You can edit this file manually or update it via CLI arguments.
-
 ```yaml
 app_id: your-uuid-here
 visual_overlay: true
 chrome_binary: google-chrome
 target_api: https://generativelanguage.googleapis.com
 port: 8080
+```
+
+## Development
+
+The project uses `uv` for dependency management and `ruff` for linting/formatting.
+
+### Setup
+```bash
+git clone https://github.com/eyjohn/aistudio-bridge
+cd aistudio-bridge
+uv sync
+```
+
+### Quality Control
+```bash
+# Lint & Format
+uv run ruff check .
+uv run ruff format .
+
+# Tests
+uv run pytest
 ```

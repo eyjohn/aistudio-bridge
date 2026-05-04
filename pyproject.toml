@@ -15,7 +15,30 @@ dependencies = [
 ]
 
 [project.scripts]
-aistudio-bridge = "aistudio_bridge:main"
+aistudio-bridge = "aistudio_bridge.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aistudio_bridge"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"] # Line too long (handled by formatter)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+
+[tool.pytype]
+inputs = ["src/aistudio_bridge"]
+python_version = "3.9"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytype>=2024.9.13",
+    "ruff>=0.15.12",
+]
