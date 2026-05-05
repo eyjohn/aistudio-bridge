@@ -24,7 +24,7 @@ class ProxyServer:
         c = usage.get("candidatesTokenCount", 0)
         th = usage.get("thoughtsTokenCount", 0)
         t = usage.get("totalTokenCount", 0)
-        return f" | Tokens: P={p}(ca={ca}), O={c}(th={th}), T={t}"
+        return f" | Tokens: Prompt={p}(Cached={ca}), Output={c}(Thoughts={th}), Total={t}"
 
     async def handle_request(self, request: web.Request):
         url = f"{self.target_base}{request.path_qs}"
