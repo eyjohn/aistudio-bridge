@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 import uuid
 
 from aiohttp import web
@@ -24,9 +25,10 @@ class ProxyServer:
         c = usage.get("candidatesTokenCount", 0)
         th = usage.get("thoughtsTokenCount", 0)
         t = usage.get("totalTokenCount", 0)
-        return f" | Tokens: Prompt={p}(Cached={ca}), Output={c}(Thoughts={th}), Total={t}"
+        return f" Token Usage: Prompt={p}(Cached={ca}), Output={c}(Thoughts={th}), Total={t}"
 
     async def handle_request(self, request: web.Request):
+        start_time = time.perf_counter()
         url = f"{self.target_base}{request.path_qs}"
         method = request.method
         is_stream = "streamGenerateContent" in request.path
@@ -50,7 +52,8 @@ class ProxyServer:
 
             status = meta.get("status", 200)
             if "error" in meta:
-                logger.error(f"[{tag}] [{status}] {method} {url} - Error: {meta['error']}")
+                duration = time.perf_counter() - start_time
+                logger.error(f"[{tag}] [{status}] {method} {url} ({duration:.2f}s) - Error: {meta['error']}")
                 self.bridge.trigger_fast_check()
                 return web.Response(status=500, text=f"Proxy Fetch Error: {meta['error']}")
 
@@ -102,16 +105,19 @@ class ProxyServer:
                     except Exception:
                         pass
 
+                duration = time.perf_counter() - start_time
                 usage_str = self._format_usage(last_usage)
-                logger.info(f"[{tag}] [DONE] {method} {url}{usage_str}")
+                logger.info(f"[{tag}] [DONE] {method} {url} ({duration:.2f}s){usage_str}")
             except (ConnectionResetError, asyncio.CancelledError):
-                logger.info(f"[{tag}] [ABORTED] {method} {url}")
+                duration = time.perf_counter() - start_time
+                logger.info(f"[{tag}] [ABORTED] {method} {url} ({duration:.2f}s)")
                 raise
 
             return response
 
         except asyncio.TimeoutError:
-            logger.error(f"[{tag}] [504] {method} {url} - Timeout")
+            duration = time.perf_counter() - start_time
+            logger.error(f"[{tag}] [504] {method} {url} ({duration:.2f}s) - Timeout")
             self.bridge.trigger_fast_check()
             return web.Response(status=504, text="Gateway Timeout: Fetch took too long to resolve headers.")
         except Exception as e:
