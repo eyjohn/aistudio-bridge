@@ -51,18 +51,19 @@ aistudio-bridge <APP_ID> --visual-overlay
 This creates `~/.aistudio-bridge/config.yaml` and initializes the Chrome profile in `~/.aistudio-bridge/profile/`.
 
 ### 3. Background Service (Linux)
-To keep the bridge running as a background service:
-
 ```bash
-# Install the systemd user service
-aistudio-bridge --install
-
-# Check status
-systemctl --user status aistudio-bridge
-
-# Stop/Remove service
-aistudio-bridge --uninstall
+aistudio-bridge --install      # Install service
+systemctl --user enable --now aistudio-bridge  # Start & Enable
+systemctl --user status aistudio-bridge        # Check Status
 ```
+
+### Monitoring Logs
+```bash
+journalctl --user -u aistudio-bridge -f        # Follow real-time
+journalctl --user -u aistudio-bridge -n 100    # Last 100 lines
+```
+
+To remove: `aistudio-bridge --uninstall`
 
 ## Connecting your apps
 Simply point your API clients to `http://localhost:8080`.
