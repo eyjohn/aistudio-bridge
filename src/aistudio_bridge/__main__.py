@@ -14,11 +14,7 @@ logger = logging.getLogger("aistudio-bridge")
 
 def setup_logging(verbose: bool):
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="[%(asctime)s] [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S"
-    )
+    logging.basicConfig(level=level, format="[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
     # Silence websockets library noise
     logging.getLogger("websockets").setLevel(logging.INFO)
 
@@ -101,7 +97,7 @@ def main():
             profile_dir,
             config["visual_overlay"],
             config.get("chrome_binary", "google-chrome"),
-            verbose=config.get("verbose", False)
+            verbose=config.get("verbose", False),
         )
         await bridge.launch()
         server = ProxyServer(bridge, config.get("target_api", "https://generativelanguage.googleapis.com"))

@@ -16,9 +16,21 @@ class ProxyServer:
         self.bridge = bridge
         self.target_base = target_base.rstrip("/")
 
+    def _format_usage(self, usage: dict) -> str:
+        if not usage:
+            return ""
+        p = usage.get("promptTokenCount", 0)
+        ca = usage.get("cachedContentTokenCount", 0)
+        c = usage.get("candidatesTokenCount", 0)
+        th = usage.get("thoughtsTokenCount", 0)
+        t = usage.get("totalTokenCount", 0)
+        return f" | Tokens: P={p}(ca={ca}), O={c}(th={th}), T={t}"
+
     async def handle_request(self, request: web.Request):
         url = f"{self.target_base}{request.path_qs}"
         method = request.method
+        is_stream = "streamGenerateContent" in request.path
+        tag = "Stream" if is_stream else "Proxy"
 
         headers = dict(request.headers)
         if "Host" in headers:
@@ -38,12 +50,12 @@ class ProxyServer:
 
             status = meta.get("status", 200)
             if "error" in meta:
-                logger.error(f"Proxying (Stream) [500]: {method} {url} - Error: {meta['error']}")
+                logger.error(f"[{tag}] [{status}] {method} {url} - Error: {meta['error']}")
                 self.bridge.trigger_fast_check()
                 return web.Response(status=500, text=f"Proxy Fetch Error: {meta['error']}")
 
-            logger.info(f"Proxying (Stream) [{status}]: {method} {url}")
-            await self.bridge._set_hud("Proxying Stream", type="success")
+            logger.info(f"[{tag}] [{status}] {method} {url}")
+            await self.bridge._set_hud(f"Proxying {tag}", type="success")
 
             resp_headers = meta.get("headers", {})
             if "content-encoding" in resp_headers:
@@ -55,6 +67,7 @@ class ProxyServer:
             await response.prepare(request)
 
             last_usage = None
+            accumulated_text = ""
             try:
                 while True:
                     chunk_data = await chunk_queue.get()
@@ -63,44 +76,46 @@ class ProxyServer:
                     if "chunk" in chunk_data:
                         chunk_bytes = base64.b64decode(chunk_data["chunk"])
 
-                        # Token Tracking: Try to find usageMetadata in the chunk
+                        # Token Tracking
                         try:
                             text = chunk_bytes.decode("utf-8", errors="ignore")
-                            if "usageMetadata" in text:
-                                # Extract JSON from SSE format (data: {...})
-                                for line in text.splitlines():
-                                    if line.startswith("data:"):
-                                        json_str = line[5:].strip()
-                                        data = json.loads(json_str)
-                                        usage = data.get("usageMetadata")
-                                        if usage:
-                                            last_usage = usage
+                            if is_stream:
+                                if "usageMetadata" in text:
+                                    for line in text.splitlines():
+                                        if line.startswith("data:"):
+                                            json_str = line[5:].strip()
+                                            data = json.loads(json_str)
+                                            usage = data.get("usageMetadata")
+                                            if usage:
+                                                last_usage = usage
+                            else:
+                                accumulated_text += text
                         except Exception:
                             pass
 
                         await response.write(chunk_bytes)
 
-                if last_usage:
-                    p = last_usage.get("promptTokenCount", 0)
-                    ca = last_usage.get("cachedContentTokenCount", 0)
-                    c = last_usage.get("candidatesTokenCount", 0)
-                    th = last_usage.get("thoughtsTokenCount", 0)
-                    t = last_usage.get("totalTokenCount", 0)
-                    logger.info(f"[USAGE] Tokens: Prompt={p} (Cached={ca}), Output={c} (Thoughts={th}), Total={t}")
+                if not is_stream and accumulated_text:
+                    try:
+                        data = json.loads(accumulated_text)
+                        last_usage = data.get("usageMetadata")
+                    except Exception:
+                        pass
 
-                logger.info(f"Proxying (Stream) [DONE]: {method} {url}")
+                usage_str = self._format_usage(last_usage)
+                logger.info(f"[{tag}] [DONE] {method} {url}{usage_str}")
             except (ConnectionResetError, asyncio.CancelledError):
-                logger.info(f"Proxying (Stream) [ABORTED]: {method} {url}")
+                logger.info(f"[{tag}] [ABORTED] {method} {url}")
                 raise
 
             return response
 
         except asyncio.TimeoutError:
-            logger.error(f"Proxying (Stream) [504]: {method} {url} - Timeout")
+            logger.error(f"[{tag}] [504] {method} {url} - Timeout")
             self.bridge.trigger_fast_check()
             return web.Response(status=504, text="Gateway Timeout: Fetch took too long to resolve headers.")
         except Exception as e:
-            logger.error(f"Proxying (Stream) [500]: {method} {url} - Exception: {str(e)}")
+            logger.error(f"[{tag}] [500] {method} {url} - Exception: {str(e)}")
             self.bridge.trigger_fast_check()
             return web.Response(status=500, text=f"Proxy Exception: {str(e)}")
         finally:
@@ -111,7 +126,8 @@ class ProxyServer:
     async def start(self, port: int):
         app = web.Application()
         app.router.add_route("*", "/{path_info:.*}", self.handle_request)
-        runner = web.AppRunner(app)
+        # Drop redundant timestamp [%t] from access log
+        runner = web.AppRunner(app, access_log_format='%a "%r" %s %b "%{Referer}i" "%{User-Agent}i"')
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()

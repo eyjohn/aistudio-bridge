@@ -27,7 +27,14 @@ logger = logging.getLogger("aistudio-bridge.bridge")
 
 
 class ChromeBridge:
-    def __init__(self, app_id: str, profile_dir: str, use_visuals: bool, chrome_binary: str = "google-chrome", verbose: bool = False):
+    def __init__(
+        self,
+        app_id: str,
+        profile_dir: str,
+        use_visuals: bool,
+        chrome_binary: str = "google-chrome",
+        verbose: bool = False,
+    ):
         self.app_id = app_id
         self.profile_dir = profile_dir
         self.use_visuals = use_visuals
@@ -132,10 +139,7 @@ class ChromeBridge:
         logger.info(f"Launching Chrome from: {self.chrome_binary}")
         try:
             self.chrome_proc = subprocess.Popen(
-                [self.chrome_binary] + flags,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                preexec_fn=os.setsid
+                [self.chrome_binary] + flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid
             )
         except Exception as e:
             logger.error(f"FAILED TO LAUNCH CHROME: {e}")
@@ -185,7 +189,7 @@ class ChromeBridge:
         try:
             await self._send_cmd("Emulation.setIdleOverride", {"isUserActive": True, "isScreenUnlocked": True})
         except Exception:
-            pass # Might not be supported in older Chrome versions
+            pass  # Might not be supported in older Chrome versions
 
         await self._send_cmd("Page.setVisibilityState", {"state": "visible"})
 
@@ -224,7 +228,7 @@ class ChromeBridge:
             await asyncio.sleep(2)
 
         await self._set_hud("Waiting for Preview Frame", type="neutral")
-        await asyncio.sleep(1) # Extra settle time for HUD
+        await asyncio.sleep(1)  # Extra settle time for HUD
         logger.info("Waiting for Preview Frame")
 
         try:
@@ -269,7 +273,9 @@ class ChromeBridge:
                 if val == 401 or val == 403:
                     await self._set_hud("PING: AUTH ERROR", success=False)
                     if not auth_warning_shown:
-                        logger.error("PING FAILED (Auth Error). Your session might have expired. Please refresh/login in Chrome.")
+                        logger.error(
+                            "PING FAILED (Auth Error). Your session might have expired. Please refresh/login in Chrome."
+                        )
                         auth_warning_shown = True
                 elif val and val != -1:
                     break
@@ -396,7 +402,7 @@ class ChromeBridge:
                         logger.info("First verification failed, attempting 'nudge' jiggle...")
                         asyncio.create_task(self._do_jiggle())
                 finally:
-                    if 'eval_id' in locals():
+                    if "eval_id" in locals():
                         self.pending_evals.pop(eval_id, None)
 
             # All attempts failed -> Escalate to hard recovery
@@ -415,7 +421,9 @@ class ChromeBridge:
         cx, cy = self.last_mouse_pos
         try:
             # 0. Get Window Size for scaling
-            eval_id = await self._send_cmd("Runtime.evaluate", {"expression": "[window.innerWidth, window.innerHeight]", "returnByValue": True})
+            eval_id = await self._send_cmd(
+                "Runtime.evaluate", {"expression": "[window.innerWidth, window.innerHeight]", "returnByValue": True}
+            )
             fut = asyncio.Future()
             self.pending_evals[eval_id] = fut
             res = await asyncio.wait_for(fut, timeout=2.0)
@@ -425,7 +433,7 @@ class ChromeBridge:
             logger.warning(f"Jiggle failed to get window size: {e}")
             width, height = 1280, 800
         finally:
-            if 'eval_id' in locals():
+            if "eval_id" in locals():
                 self.pending_evals.pop(eval_id, None)
 
         # 1. Move through 3 random points for more "activity"
@@ -475,6 +483,7 @@ class ChromeBridge:
 
     async def _maintenance_loop(self):
         import time
+
         logger.info("Maintenance loop started.")
         last_jiggle = 0  # Trigger immediately on first loop
         jiggle_interval = random.uniform(300, 600)  # 5-10 min
