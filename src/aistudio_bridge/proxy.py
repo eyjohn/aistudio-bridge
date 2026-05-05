@@ -25,7 +25,7 @@ class ProxyServer:
         c = usage.get("candidatesTokenCount", 0)
         th = usage.get("thoughtsTokenCount", 0)
         t = usage.get("totalTokenCount", 0)
-        return f" Token Usage: Prompt={p}(Cached={ca}), Output={c}(Thoughts={th}), Total={t}"
+        return f" Token Usage: Prompt={p} (Cached={ca}), Output={c} (Thoughts={th}), Total={t}"
 
     async def handle_request(self, request: web.Request):
         start_time = time.perf_counter()
