@@ -1,12 +1,26 @@
 import argparse
 import asyncio
 import importlib.metadata
+import logging
 
 import yaml
 
 from .bridge import DEFAULT_HOME, DEFAULT_PORT, ChromeBridge
 from .proxy import ProxyServer
 from .service import manage_service
+
+logger = logging.getLogger("aistudio-bridge")
+
+
+def setup_logging(verbose: bool):
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="[%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S"
+    )
+    # Silence websockets library noise
+    logging.getLogger("websockets").setLevel(logging.INFO)
 
 
 def main():
@@ -27,9 +41,9 @@ def main():
     parser.add_argument("--install", action="store_true", help="Install as systemd user service")
     parser.add_argument("--uninstall", action="store_true", help="Uninstall systemd user service")
     parser.add_argument("--config", action="store_true", help="Show current config and exit")
+    parser.add_argument("--verbose", action="store_true", help="Log all CDP events for debugging")
 
     args = parser.parse_args()
-    print(f"[*] Starting AI Studio Streaming Bridge v{version}")
 
     DEFAULT_HOME.mkdir(parents=True, exist_ok=True)
     config_path = DEFAULT_HOME / "config.yaml"
@@ -49,7 +63,13 @@ def main():
         config["chrome_binary"] = args.chrome_binary
     if args.target_api:
         config["target_api"] = args.target_api
+
     config["visual_overlay"] = args.visual_overlay or config.get("visual_overlay", False)
+    config["verbose"] = args.verbose or config.get("verbose", False)
+
+    setup_logging(config["verbose"])
+    logger.info(f"Starting AI Studio Streaming Bridge v{version}")
+    logger.debug("Debug logging enabled")
 
     with open(config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False)
@@ -64,6 +84,7 @@ def main():
         return
 
     if args.config:
+        logger.info("Current Configuration:")
         print(yaml.dump(config, default_flow_style=False))
         return
 
@@ -76,7 +97,11 @@ def main():
 
     async def run():
         bridge = ChromeBridge(
-            app_id, profile_dir, config["visual_overlay"], config.get("chrome_binary", "google-chrome")
+            app_id,
+            profile_dir,
+            config["visual_overlay"],
+            config.get("chrome_binary", "google-chrome"),
+            verbose=config.get("verbose", False)
         )
         await bridge.launch()
         server = ProxyServer(bridge, config.get("target_api", "https://generativelanguage.googleapis.com"))

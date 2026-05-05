@@ -1,16 +1,19 @@
 import asyncio
 import json
+import logging
 import os
 import random
+import signal
 import subprocess
 import urllib.request
-import uuid
-from datetime import datetime
 from pathlib import Path
 
 import websockets
 
 from .resources import get_asset
+
+# Ensure fresh entropy for maintenance patterns
+random.seed()
 
 DEBUG_PORT = 9222
 DEFAULT_PORT = 8080
@@ -20,13 +23,16 @@ DEFAULT_HOME = Path.home() / ".aistudio-bridge"
 VISUALIZER_JS = get_asset("visualizer.js")
 BRIDGE_FETCH_STREAM_JS_FUNC = get_asset("fetch_stream.js")
 
+logger = logging.getLogger("aistudio-bridge.bridge")
+
 
 class ChromeBridge:
-    def __init__(self, app_id: str, profile_dir: str, use_visuals: bool, chrome_binary: str = "google-chrome"):
+    def __init__(self, app_id: str, profile_dir: str, use_visuals: bool, chrome_binary: str = "google-chrome", verbose: bool = False):
         self.app_id = app_id
         self.profile_dir = profile_dir
         self.use_visuals = use_visuals
         self.chrome_binary = chrome_binary
+        self.verbose = verbose
         self.target_url = (
             f"https://aistudio.google.com/apps/{app_id}?fullscreenApplet=true&showPreview=true&showAssistant=true"
         )
@@ -39,9 +45,11 @@ class ChromeBridge:
         self.proxy_ready = False
         self.consecutive_failures = 0
         self.is_recovering = False
+        self.chrome_proc = None
 
         # Streams registry
         self.streams = {}  # reqId -> {"meta": Future, "queue": Queue}
+        self.is_checking_health = False
 
     async def _send_cmd(self, method, params=None, session_id=None):
         cmd_id = self.msg_id
@@ -52,12 +60,12 @@ class ChromeBridge:
         try:
             await self.ws.send(json.dumps(payload))
         except Exception as e:
-            print(f"[!] WS SEND FAILED: {e}")
+            logger.error(f"WS SEND FAILED: {e}")
             raise
         return cmd_id
 
     async def _set_hud(self, text, success=False):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
+        logger.info(text)
         if self.use_visuals:
             try:
                 success_str = "true" if success else "false"
@@ -65,8 +73,8 @@ class ChromeBridge:
                     "Runtime.evaluate",
                     {"expression": f"if (window.__viz) window.__viz.update({json.dumps(text)}, {success_str})"},
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"HUD UPDATE FAILED: {e}")
 
     async def launch(self):
         attempt = 0
@@ -76,16 +84,14 @@ class ChromeBridge:
                 break
             except Exception as e:
                 attempt += 1
-                print(f"[!] Launch attempt {attempt} failed: {e}")
-                print("Retrying in 10s...")
+                logger.error(f"Launch attempt {attempt} failed: {e}")
+                logger.info("Retrying in 10s...")
                 await asyncio.sleep(10)
 
     async def _do_launch(self):
-        print(f"[{datetime.now().isoformat()}] BOOTSTRAPPING BRIDGE FOR: {self.app_id}")
-
-        binary_name = os.path.basename(self.chrome_binary)
-        print(f"Cleaning up existing {binary_name} instances...")
-        subprocess.run(["pkill", "-9", "-x", binary_name], stderr=subprocess.DEVNULL)
+        logger.info(f"Bootstrapping bridge for: {self.app_id}")
+        logger.info("Cleaning up existing bridge instances...")
+        subprocess.run(["pkill", "-9", "-f", f"--user-data-dir={self.profile_dir}"], stderr=subprocess.DEVNULL)
         await asyncio.sleep(2)
 
         flags = [
@@ -97,14 +103,19 @@ class ChromeBridge:
             f"--app={self.target_url}",
         ]
 
-        print(f"Launching Chrome from: {self.chrome_binary}")
+        logger.info(f"Launching Chrome from: {self.chrome_binary}")
         try:
-            subprocess.Popen([self.chrome_binary] + flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.chrome_proc = subprocess.Popen(
+                [self.chrome_binary] + flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                preexec_fn=os.setsid
+            )
         except Exception as e:
-            print(f"[!] FAILED TO LAUNCH CHROME: {e}")
+            logger.error(f"FAILED TO LAUNCH CHROME: {e}")
             raise
 
-        print(f"Waiting for Chrome CDP on port {DEBUG_PORT}...")
+        logger.info(f"Waiting for Chrome CDP on port {DEBUG_PORT}...")
         ws_url = None
         for i in range(30):
             try:
@@ -114,18 +125,22 @@ class ChromeBridge:
                     p for p in pages if p["type"] == "page" and ("aistudio" in p["url"] or p["url"] == "about:blank")
                 )
                 ws_url = page["webSocketDebuggerUrl"]
-                print(f"Connected to Chrome CDP: {ws_url}")
+                logger.info(f"Connected to Chrome CDP: {ws_url}")
                 break
             except Exception:
                 if i % 5 == 0:
-                    print(f"Still waiting for CDP... ({i}/30)")
+                    logger.info(f"Still waiting for CDP... ({i}/30)")
                 await asyncio.sleep(1)
 
         if not ws_url:
             raise Exception(f"Failed to find websocket URL on port {DEBUG_PORT}. Is Chrome running?")
 
-        print("Establishing WebSocket connection...")
-        self.ws = await websockets.connect(ws_url, ping_interval=None)
+        logger.info("Establishing WebSocket connection...")
+        try:
+            self.ws = await websockets.connect(ws_url, ping_interval=None)
+        except Exception as e:
+            logger.error(f"FAILED TO CONNECT TO WS: {e}")
+            raise
 
         await self._send_cmd("Runtime.enable")
         await self._send_cmd("Page.enable")
@@ -139,9 +154,23 @@ class ChromeBridge:
             "Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
         )
 
+        # Force visibility and disable idle throttling
+        await self._send_cmd("Emulation.setFocusEmulation", {"enabled": True})
+        try:
+            await self._send_cmd("Emulation.setIdleOverride", {"isUserActive": True, "isScreenUnlocked": True})
+        except Exception:
+            pass # Might not be supported in older Chrome versions
+
+        await self._send_cmd("Page.setVisibilityState", {"state": "visible"})
+
         asyncio.create_task(self._listener())
 
         await self._send_cmd("Page.navigate", {"url": self.target_url})
+
+        # Reinforce injection after navigation
+        if self.use_visuals:
+            await asyncio.sleep(1)
+            await self._send_cmd("Runtime.evaluate", {"expression": VISUALIZER_JS})
 
         # 1. Proactive Auth Detection
         auth_warning_shown = False
@@ -155,12 +184,10 @@ class ChromeBridge:
                 current_url = res.get("result", {}).get("result", {}).get("value", "")
                 if "accounts.google.com" in current_url:
                     if not auth_warning_shown:
-                        print("\n" + "!" * 60)
-                        print("[!] AUTHENTICATION REQUIRED: Please log in in the Chrome window.")
-                        print("!" * 60 + "\n")
+                        logger.warning("Authentication required: Please log in via the Chrome window")
                         await self._send_cmd("Page.bringToFront")
                         auth_warning_shown = True
-                    await self._set_hud("LOGIN REQUIRED")
+                    await self._set_hud("Login Required")
                 elif self.app_id in current_url:
                     break
             except Exception:
@@ -169,15 +196,17 @@ class ChromeBridge:
                 self.pending_evals.pop(eval_id, None)
             await asyncio.sleep(2)
 
-        await self._set_hud("WAITING FOR OOPIF...")
+        await self._set_hud("Waiting for OOPIF")
+        await asyncio.sleep(1) # Extra settle time for HUD
+        logger.info("Waiting for OOPIF")
 
         try:
             self.oopif_ready.clear()
             await asyncio.wait_for(self.oopif_ready.wait(), timeout=15)
-            await self._set_hud("OOPIF ATTACHED. SETTLING...")
+            await self._set_hud("OOPIF attached, settling")
             await asyncio.sleep(4)
         except asyncio.TimeoutError:
-            await self._set_hud("OOPIF TIMEOUT (PROCEEDING)")
+            await self._set_hud("OOPIF timeout (proceeding)")
             await asyncio.sleep(2)
 
         if not self.target_sid:
@@ -193,7 +222,8 @@ class ChromeBridge:
             self.maintenance_task = asyncio.create_task(self._maintenance_loop())
 
         # 3. Fire the ping and wait for it to succeed
-        await self._set_hud("WAITING ON PING...")
+        await self._set_hud("Waiting on ping")
+        logger.info("Waiting for initial ping")
         ping_js = get_asset("ping.js", GEMINI_API_KEY="MY_GEMINI_API_KEY")
 
         for _ in range(120):  # Wait up to ~4 mins
@@ -212,9 +242,7 @@ class ChromeBridge:
                 if val == 401 or val == 403:
                     await self._set_hud("PING: AUTH ERROR", success=False)
                     if not auth_warning_shown:
-                        print(
-                            "\n[!] PING FAILED (Auth Error). Your session might have expired. Please refresh/login in Chrome."
-                        )
+                        logger.error("PING FAILED (Auth Error). Your session might have expired. Please refresh/login in Chrome.")
                         auth_warning_shown = True
                 elif val and val != -1:
                     break
@@ -226,22 +254,35 @@ class ChromeBridge:
 
         self.proxy_ready = True
         self.consecutive_failures = 0
-        await self._set_hud("PROXY READY.", success=True)
-        print("\n[✓] BRIDGE INITIALIZATION COMPLETE. PROXY READY.")
+        await self._set_hud("Proxy Ready", success=True)
+        logger.info("Bridge initialization complete, proxy ready")
 
     async def _listener(self):
         try:
             async for msg in self.ws:
                 try:
                     data = json.loads(msg)
+                    if "method" in data:
+                        # Skip extremely frequent stream binding events in debug logs
+                        if data["method"] != "Runtime.bindingCalled":
+                            logger.debug(f"CDP Event: {data['method']}")
+                    elif "id" in data:
+                        if "error" in data:
+                            logger.error(f"CDP Response Error (ID:{data['id']}): {data['error']}")
+
                     if "id" in data and data["id"] in self.pending_evals:
                         self.pending_evals[data["id"]].set_result(data)
 
                     method = data.get("method")
                     if method == "Target.attachedToTarget":
-                        if data["params"]["targetInfo"]["type"] == "iframe":
+                        target_info = data["params"]["targetInfo"]
+                        logger.debug(f"Attached to {target_info['type']}: {target_info['url']}")
+                        if target_info["type"] == "iframe":
                             self.target_sid = data["params"]["sessionId"]
                             self.oopif_ready.set()
+
+                    if method == "Target.detachedFromTarget":
+                        logger.debug(f"Detached from session: {data['params']['sessionId']}")
 
                     if method == "Runtime.bindingCalled":
                         name = data["params"]["name"]
@@ -257,20 +298,102 @@ class ChromeBridge:
                                     self.streams[reqId]["queue"].put_nowait(parsed)
                 except Exception:
                     pass
-        except Exception as e:
-            print(f"[!] LISTENER CRASHED: {e}")
+        except Exception:
+            logger.error("LISTENER CRASHED", exc_info=True)
             self.proxy_ready = False
+            if not self.is_recovering:
+                asyncio.create_task(self.recover())
+
+            # 3. Aggressive Frequency (approx 1 min)
+            if self.proxy_ready:
+                await asyncio.sleep(random.uniform(45, 75))
+            else:
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+
+    def trigger_fast_check(self):
+        """Called by proxy on request failure to force an immediate health check."""
+        if self.proxy_ready and not self.is_recovering:
+            # We can't easily 'jump' the maintenance loop sleep,
+            # so we just fire a one-off check task.
+            asyncio.create_task(self._do_heartbeat_check())
+
+    async def _do_heartbeat_check(self):
+        """Unified verification path: Immediate, 5s, 10s retries."""
+        if self.is_checking_health or self.is_recovering:
+            return
+
+        self.is_checking_health = True
+        try:
+            # Pacing: 0s, 5s, 10s = ~15s total verification window
+            retries = [0, 5, 10]
+            for attempt, delay in enumerate(retries, 1):
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                logger.info(f"Health verification (Attempt {attempt}/3, delay: {delay}s)...")
+                try:
+                    ping_js = get_asset("ping.js", GEMINI_API_KEY="MY_GEMINI_API_KEY")
+                    eval_id = await self._send_cmd(
+                        "Runtime.evaluate",
+                        {"expression": ping_js, "awaitPromise": True, "returnByValue": True},
+                        session_id=self.target_sid,
+                    )
+                    future = asyncio.Future()
+                    self.pending_evals[eval_id] = future
+
+                    # 1. Quick WS check
+                    try:
+                        pong_waiter = await self.ws.ping()
+                        await asyncio.wait_for(pong_waiter, timeout=5.0)
+                    except Exception:
+                        raise Exception("Websocket stall")
+
+                    # 2. App check
+                    res = await asyncio.wait_for(future, timeout=10.0)
+                    val = res.get("result", {}).get("result", {}).get("value")
+
+                    if val and val != -1 and val < 400:
+                        logger.info(f"Health verified (status: {val})")
+                        self.consecutive_failures = 0
+                        return True
+                    else:
+                        logger.warning(f"Verification failed (status: {val})")
+                except Exception as e:
+                    logger.warning(f"Verification attempt {attempt} failed: {e}")
+                finally:
+                    if 'eval_id' in locals():
+                        self.pending_evals.pop(eval_id, None)
+
+            # All attempts failed -> Escalate to hard recovery
+            logger.error("Verification exhausted. Escalating to recovery.")
+            asyncio.create_task(self.recover())
+            return False
+        finally:
+            self.is_checking_health = False
 
     async def _maintenance_loop(self):
         cx, cy = 500, 0
         while True:
-            # 1. Jiggle mouse
+            # 0. Get Window Size for scaling
+            try:
+                eval_id = await self._send_cmd("Runtime.evaluate", {"expression": "[window.innerWidth, window.innerHeight]", "returnByValue": True})
+                fut = asyncio.Future()
+                self.pending_evals[eval_id] = fut
+                res = await asyncio.wait_for(fut, timeout=2.0)
+                width, height = res["result"]["result"]["value"]
+            except Exception:
+                width, height = 1280, 800
+
+            # 1. Jiggle mouse (Alternate between Header and App Body)
             is_app = random.random() > 0.5
-            tx, ty = (
-                (random.randint(400, 700), random.randint(300, 550))
-                if is_app
-                else (random.randint(200, 900), random.randint(15, 45))
-            )
+            if is_app:
+                # Main content area (Left-center)
+                tx = random.randint(int(width * 0.1), int(width * 0.4))
+                ty = random.randint(int(height * 0.3), int(height * 0.7))
+            else:
+                # Top bar area (Avoid absolute top-left HUD corner, stick to left-middle)
+                tx = random.randint(int(width * 0.1), int(width * 0.4))
+                ty = random.randint(int(height * 0.02), int(height * 0.06))
 
             try:
                 steps = 15
@@ -301,81 +424,45 @@ class ChromeBridge:
             except Exception:
                 pass
 
-            # 2. Warmup Ping
+            # 2. Heartbeat check with retries
             if self.proxy_ready and not self.is_recovering:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [MAINTENANCE] Sending warmup ping...")
-                req_id = f"warmup-{uuid.uuid4()}"
-                try:
-                    # Use the same logic as init ping, but through the stream executor
-                    ping_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={'MY_GEMINI_API_KEY'}"
-                    meta_fut, queue = await self.execute_fetch_stream(
-                        ping_url,
-                        "GET",
-                        {},
-                        None,
-                        req_id,
-                    )
-                    res = await asyncio.wait_for(meta_fut, timeout=15)
-                    if res.get("status") == 200:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [MAINTENANCE] Warmup success.")
-                        self._check_health(True)
-                    else:
-                        print(
-                            f"[{datetime.now().strftime('%H:%M:%S')}] [MAINTENANCE] Warmup failed: {res.get('status')} {res.get('error', '')}"
-                        )
-                        self._check_health(False)
-                except Exception as e:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [MAINTENANCE] Warmup exception: {e}")
-                    self._check_health(False)
-                finally:
-                    self.streams.pop(req_id, None)
+                await self._do_heartbeat_check()
 
-            # 3. Flexible Sleep
+            # 3. Sleep (approx 1 min)
             if self.proxy_ready:
-                await asyncio.sleep(random.uniform(300, 900))  # 5-15 mins
+                await asyncio.sleep(random.uniform(45, 75))
             else:
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-
-    def _check_health(self, success: bool):
-        if success:
-            self.consecutive_failures = 0
-        else:
-            self.consecutive_failures += 1
-            if self.consecutive_failures >= 3 and not self.is_recovering:
-                print(f"[!] Health check failed {self.consecutive_failures} times. Triggering recovery...")
-                asyncio.create_task(self.recover())
+                await asyncio.sleep(random.uniform(1.0, 2.0))
 
     async def recover(self):
         if self.is_recovering:
             return
         self.is_recovering = True
         self.proxy_ready = False
+        self.consecutive_failures = 0
 
         try:
-            # Tier 1: Page Refresh
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [RECOVERY] Tier 1: Refreshing page...")
-            await self._set_hud("RECOVERY: REFRESHING")
-            await self._send_cmd("Page.reload")
+            logger.warning("Triggering hard recovery: Restarting browser session")
+            await self._set_hud("Recovery: Restarting")
 
-            # Re-init attempt
-            try:
-                await self._do_launch()  # Re-runs auth checks and ping
-                print("[✓] Recovery Tier 1 (Refresh) successful.")
-                return
-            except Exception as e:
-                print(f"[!] Recovery Tier 1 failed: {e}")
+            # 1. Atomic Termination
+            if self.chrome_proc:
+                logger.info(f"Terminating process group: {self.chrome_proc.pid}")
+                try:
+                    os.killpg(os.getpgid(self.chrome_proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+                self.chrome_proc = None
 
-            # Tier 2: Full Restart
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [RECOVERY] Tier 2: Full browser restart...")
-            await self._set_hud("RECOVERY: RESTARTING")
             if self.ws:
                 try:
                     await self.ws.close()
                 except Exception:
                     pass
 
+            # 2. Re-launch
             await self.launch()
-            print("[✓] Recovery Tier 2 (Restart) complete.")
+            logger.info("Hard recovery complete")
 
         finally:
             self.is_recovering = False
