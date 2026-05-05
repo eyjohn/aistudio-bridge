@@ -30,6 +30,8 @@ class ProxyServer:
         body_text = body_bytes.decode("utf-8", errors="ignore") if body_bytes else None
 
         req_id = str(uuid.uuid4())
+        self.bridge.active_streams += 1
+        await self.bridge._set_hud("Request Pending...", type="success")
         try:
             meta_future, chunk_queue = await self.bridge.execute_fetch_stream(url, method, headers, body_text, req_id)
             meta = await asyncio.wait_for(meta_future, timeout=70.0)  # slightly more than JS timeout
@@ -41,7 +43,8 @@ class ProxyServer:
                 return web.Response(status=500, text=f"Proxy Fetch Error: {meta['error']}")
 
             logger.info(f"Proxying (Stream) [{status}]: {method} {url}")
-            self.bridge._check_health(True)
+            await self.bridge._set_hud("Proxying Stream", type="success")
+
             resp_headers = meta.get("headers", {})
             if "content-encoding" in resp_headers:
                 del resp_headers["content-encoding"]
@@ -101,6 +104,8 @@ class ProxyServer:
             self.bridge.trigger_fast_check()
             return web.Response(status=500, text=f"Proxy Exception: {str(e)}")
         finally:
+            self.bridge.active_streams -= 1
+            await self.bridge._refresh_hud()
             self.bridge.streams.pop(req_id, None)
 
     async def start(self, port: int):

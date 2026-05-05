@@ -50,6 +50,10 @@ class ChromeBridge:
         # Streams registry
         self.streams = {}  # reqId -> {"meta": Future, "queue": Queue}
         self.is_checking_health = False
+        self.active_streams = 0
+        self.last_status_text = "Initializing..."
+        self.last_status_type = "neutral"
+        self.last_mouse_pos = (500, 400)
 
     async def _send_cmd(self, method, params=None, session_id=None):
         cmd_id = self.msg_id
@@ -64,17 +68,39 @@ class ChromeBridge:
             raise
         return cmd_id
 
-    async def _set_hud(self, text, success=False):
-        logger.info(text)
-        if self.use_visuals:
-            try:
-                success_str = "true" if success else "false"
-                await self._send_cmd(
-                    "Runtime.evaluate",
-                    {"expression": f"if (window.__viz) window.__viz.update({json.dumps(text)}, {success_str})"},
-                )
-            except Exception as e:
-                logger.warning(f"HUD UPDATE FAILED: {e}")
+    async def _set_hud(self, text, type="neutral"):
+        # Priority Logic: Recovery > Health Check > Requests > Idle/Jiggle
+        if self.is_recovering and type != "recovery":
+            return
+        if self.is_checking_health and type not in ("warning", "error", "recovery"):
+            return
+
+        self.last_status_text = text
+        self.last_status_type = type
+
+        if not self.use_visuals:
+            return
+        try:
+            has_reqs = "true" if self.active_streams > 0 else "false"
+            await self._send_cmd(
+                "Runtime.evaluate",
+                {"expression": f"if (window.__viz) window.__viz.update({json.dumps(text)}, '{type}', {has_reqs})"},
+            )
+        except Exception as e:
+            logger.warning(f"HUD UPDATE FAILED: {e}")
+
+    async def _refresh_hud(self):
+        """Restore HUD to best available state based on current activity."""
+        if self.is_recovering:
+            await self._set_hud("Hard Recovery...", type="recovery")
+        elif self.is_checking_health:
+            await self._set_hud("Health Check", type="warning")
+        elif self.active_streams > 0:
+            await self._set_hud("Proxying Stream", type="success")
+        elif self.proxy_ready:
+            await self._set_hud("Bridge Ready", type="success")
+        else:
+            await self._set_hud("Initializing...", type="neutral")
 
     async def launch(self):
         attempt = 0
@@ -182,12 +208,13 @@ class ChromeBridge:
             try:
                 res = await asyncio.wait_for(future, timeout=2.0)
                 current_url = res.get("result", {}).get("result", {}).get("value", "")
+                logger.debug(f"Auth loop check: {current_url}")
                 if "accounts.google.com" in current_url:
                     if not auth_warning_shown:
                         logger.warning("Authentication required: Please log in via the Chrome window")
                         await self._send_cmd("Page.bringToFront")
                         auth_warning_shown = True
-                    await self._set_hud("Login Required")
+                    await self._set_hud("Login Required", type="warning")
                 elif self.app_id in current_url:
                     break
             except Exception:
@@ -196,17 +223,17 @@ class ChromeBridge:
                 self.pending_evals.pop(eval_id, None)
             await asyncio.sleep(2)
 
-        await self._set_hud("Waiting for OOPIF")
+        await self._set_hud("Waiting for Preview Frame", type="neutral")
         await asyncio.sleep(1) # Extra settle time for HUD
-        logger.info("Waiting for OOPIF")
+        logger.info("Waiting for Preview Frame")
 
         try:
             self.oopif_ready.clear()
             await asyncio.wait_for(self.oopif_ready.wait(), timeout=15)
-            await self._set_hud("OOPIF attached, settling")
+            await self._set_hud("Preview Frame attached", type="success")
             await asyncio.sleep(4)
         except asyncio.TimeoutError:
-            await self._set_hud("OOPIF timeout (proceeding)")
+            await self._set_hud("Preview Frame timeout", type="warning")
             await asyncio.sleep(2)
 
         if not self.target_sid:
@@ -222,7 +249,7 @@ class ChromeBridge:
             self.maintenance_task = asyncio.create_task(self._maintenance_loop())
 
         # 3. Fire the ping and wait for it to succeed
-        await self._set_hud("Waiting on ping")
+        await self._set_hud("Waiting on ping", type="neutral")
         logger.info("Waiting for initial ping")
         ping_js = get_asset("ping.js", GEMINI_API_KEY="MY_GEMINI_API_KEY")
 
@@ -254,7 +281,7 @@ class ChromeBridge:
 
         self.proxy_ready = True
         self.consecutive_failures = 0
-        await self._set_hud("Proxy Ready", success=True)
+        await self._set_hud("Bridge Ready", type="success")
         logger.info("Bridge initialization complete, proxy ready")
 
     async def _listener(self):
@@ -330,6 +357,8 @@ class ChromeBridge:
                 if delay > 0:
                     await asyncio.sleep(delay)
 
+                status_text = f"Health Check ({attempt}/3)"
+                await self._set_hud(status_text, type="warning")
                 logger.info(f"Health verification (Attempt {attempt}/3, delay: {delay}s)...")
                 try:
                     ping_js = get_asset("ping.js", GEMINI_API_KEY="MY_GEMINI_API_KEY")
@@ -358,8 +387,14 @@ class ChromeBridge:
                         return True
                     else:
                         logger.warning(f"Verification failed (status: {val})")
+                        if attempt == 1:
+                            logger.info("First verification failed, attempting 'nudge' jiggle...")
+                            asyncio.create_task(self._do_jiggle())
                 except Exception as e:
                     logger.warning(f"Verification attempt {attempt} failed: {e}")
+                    if attempt == 1:
+                        logger.info("First verification failed, attempting 'nudge' jiggle...")
+                        asyncio.create_task(self._do_jiggle())
                 finally:
                     if 'eval_id' in locals():
                         self.pending_evals.pop(eval_id, None)
@@ -371,32 +406,42 @@ class ChromeBridge:
         finally:
             self.is_checking_health = False
 
-    async def _maintenance_loop(self):
-        cx, cy = 500, 0
-        while True:
+    async def _do_jiggle(self):
+        """Perform a window-scaled mouse interaction to keep session active."""
+        logger.info("Starting maintenance jiggle...")
+        if self.is_recovering:
+            return
+
+        cx, cy = self.last_mouse_pos
+        try:
             # 0. Get Window Size for scaling
-            try:
-                eval_id = await self._send_cmd("Runtime.evaluate", {"expression": "[window.innerWidth, window.innerHeight]", "returnByValue": True})
-                fut = asyncio.Future()
-                self.pending_evals[eval_id] = fut
-                res = await asyncio.wait_for(fut, timeout=2.0)
-                width, height = res["result"]["result"]["value"]
-            except Exception:
-                width, height = 1280, 800
+            eval_id = await self._send_cmd("Runtime.evaluate", {"expression": "[window.innerWidth, window.innerHeight]", "returnByValue": True})
+            fut = asyncio.Future()
+            self.pending_evals[eval_id] = fut
+            res = await asyncio.wait_for(fut, timeout=2.0)
+            width, height = res["result"]["result"]["value"]
+            logger.debug(f"Jiggle detected window: {width}x{height}")
+        except Exception as e:
+            logger.warning(f"Jiggle failed to get window size: {e}")
+            width, height = 1280, 800
+        finally:
+            if 'eval_id' in locals():
+                self.pending_evals.pop(eval_id, None)
 
-            # 1. Jiggle mouse (Alternate between Header and App Body)
-            is_app = random.random() > 0.5
-            if is_app:
-                # Main content area (Left-center)
-                tx = random.randint(int(width * 0.1), int(width * 0.4))
-                ty = random.randint(int(height * 0.3), int(height * 0.7))
-            else:
-                # Top bar area (Avoid absolute top-left HUD corner, stick to left-middle)
-                tx = random.randint(int(width * 0.1), int(width * 0.4))
-                ty = random.randint(int(height * 0.02), int(height * 0.06))
+        # 1. Move through 3 random points for more "activity"
+        await self._set_hud("Jiggling Mouse", type="neutral")
 
-            try:
-                steps = 15
+        try:
+            for _ in range(3):
+                is_app = random.random() > 0.4
+                if is_app:
+                    tx = random.randint(int(width * 0.1), int(width * 0.6))
+                    ty = random.randint(int(height * 0.2), int(height * 0.8))
+                else:
+                    tx = random.randint(int(width * 0.1), int(width * 0.5))
+                    ty = random.randint(int(height * 0.02), int(height * 0.08))
+
+                steps = 20
                 for i in range(steps):
                     t = i / steps
                     mx, my = cx + (tx - cx) * t, cy + (ty - cy) * t
@@ -410,8 +455,8 @@ class ChromeBridge:
                             {"expression": f"if (window.__viz) window.__viz.move({int(mx)}, {int(my)})"},
                         )
                     await asyncio.sleep(0.01)
-                cx, cy = tx, ty
 
+                cx, cy = tx, ty
                 await self._send_cmd(
                     "Input.dispatchMouseEvent",
                     {"type": "mousePressed", "x": tx, "y": ty, "button": "left", "clickCount": 1},
@@ -421,12 +466,34 @@ class ChromeBridge:
                     "Input.dispatchMouseEvent",
                     {"type": "mouseReleased", "x": tx, "y": ty, "button": "left", "clickCount": 1},
                 )
-            except Exception:
-                pass
 
-            # 2. Heartbeat check with retries
+            self.last_mouse_pos = (cx, cy)
+        except Exception:
+            pass
+        finally:
+            await self._refresh_hud()
+
+    async def _maintenance_loop(self):
+        import time
+        logger.info("Maintenance loop started.")
+        last_jiggle = 0  # Trigger immediately on first loop
+        jiggle_interval = random.uniform(300, 600)  # 5-10 min
+
+        while True:
+            # 1. Heartbeat check with retries every ~1 min
             if self.proxy_ready and not self.is_recovering:
                 await self._do_heartbeat_check()
+                await self._refresh_hud()
+
+            # 2. Check for decoupled jiggle
+            now = time.time()
+            if now - last_jiggle > jiggle_interval:
+                await self._do_jiggle()
+                last_jiggle = now
+                if self.proxy_ready:
+                    jiggle_interval = random.uniform(300, 600)
+                else:
+                    jiggle_interval = random.uniform(10, 20)  # "Continuous" aggressive jiggle during warmup
 
             # 3. Sleep (approx 1 min)
             if self.proxy_ready:
@@ -443,7 +510,7 @@ class ChromeBridge:
 
         try:
             logger.warning("Triggering hard recovery: Restarting browser session")
-            await self._set_hud("Recovery: Restarting")
+            await self._set_hud("Hard Recovery...", type="recovery")
 
             # 1. Atomic Termination
             if self.chrome_proc:
