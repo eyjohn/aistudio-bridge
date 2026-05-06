@@ -257,18 +257,20 @@ class ChromeBridge:
         logger.info("Waiting for initial ping")
         ping_js = get_asset("ping.js", GEMINI_API_KEY="MY_GEMINI_API_KEY")
 
-        for _ in range(120):  # Wait up to ~4 mins
+        for i in range(120):  # Wait up to ~4 mins
             eval_id = await self._send_cmd(
                 "Runtime.evaluate",
                 {"expression": ping_js, "awaitPromise": True, "returnByValue": True},
                 session_id=self.target_sid,
             )
+            logger.debug(f"Warmup ping attempt {i + 1} (eval_id: {eval_id})")
 
             future = asyncio.Future()
             self.pending_evals[eval_id] = future
             try:
                 res = await asyncio.wait_for(future, timeout=5.0)
                 val = res.get("result", {}).get("result", {}).get("value")
+                logger.debug(f"Warmup ping result: {val}")
 
                 if val == 401 or val == 403:
                     await self._set_hud("PING: AUTH ERROR", success=False)
@@ -278,9 +280,10 @@ class ChromeBridge:
                         )
                         auth_warning_shown = True
                 elif val and val != -1:
+                    logger.info(f"Initial ping successful (status: {val})")
                     break
             except asyncio.TimeoutError:
-                pass
+                logger.debug("Initial ping attempt timed out")
             finally:
                 self.pending_evals.pop(eval_id, None)
             await asyncio.sleep(2)
@@ -450,10 +453,13 @@ class ChromeBridge:
             })()
             """
             eval_id = await self._send_cmd("Runtime.evaluate", {"expression": reload_script, "returnByValue": True})
+            logger.debug(f"Auto-reload check (eval_id: {eval_id})")
             fut = asyncio.Future()
             self.pending_evals[eval_id] = fut
             res = await asyncio.wait_for(fut, timeout=2.0)
-            if res.get("result", {}).get("result", {}).get("value"):
+            val = res.get("result", {}).get("result", {}).get("value")
+            logger.debug(f"Auto-reload check result: {val}")
+            if val:
                 logger.info("Detected 'App has been paused' overlay - clicked Reload.")
                 await self._set_hud("App Reloaded", type="success")
                 await asyncio.sleep(2)  # Give it a moment to reload
@@ -529,13 +535,15 @@ class ChromeBridge:
                 if self.proxy_ready:
                     jiggle_interval = random.uniform(300, 600)
                 else:
-                    jiggle_interval = random.uniform(10, 20)  # "Continuous" aggressive jiggle during warmup
+                    # During warmup, jiggle less frequently to avoid interrupting loads
+                    jiggle_interval = random.uniform(60, 120)
 
             # 3. Sleep (approx 1 min)
             if self.proxy_ready:
                 await asyncio.sleep(random.uniform(45, 75))
             else:
-                await asyncio.sleep(random.uniform(1.0, 2.0))
+                # During warmup, check more frequently
+                await asyncio.sleep(5.0)
 
     async def recover(self):
         if self.is_recovering:
