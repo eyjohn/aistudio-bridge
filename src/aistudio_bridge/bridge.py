@@ -436,7 +436,34 @@ class ChromeBridge:
             if "eval_id" in locals():
                 self.pending_evals.pop(eval_id, None)
 
-        # 1. Move through 3 random points for more "activity"
+        # 1. Clear 'App has been paused' if present
+        try:
+            reload_script = """
+            (() => {
+                const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                const reloadBtn = buttons.find(b => b.innerText && b.innerText.includes('Reload the app'));
+                if (reloadBtn) {
+                    reloadBtn.click();
+                    return true;
+                }
+                return false;
+            })()
+            """
+            eval_id = await self._send_cmd("Runtime.evaluate", {"expression": reload_script, "returnByValue": True})
+            fut = asyncio.Future()
+            self.pending_evals[eval_id] = fut
+            res = await asyncio.wait_for(fut, timeout=2.0)
+            if res.get("result", {}).get("result", {}).get("value"):
+                logger.info("Detected 'App has been paused' overlay - clicked Reload.")
+                await self._set_hud("App Reloaded", type="success")
+                await asyncio.sleep(2)  # Give it a moment to reload
+        except Exception:
+            pass
+        finally:
+            if "eval_id" in locals():
+                self.pending_evals.pop(eval_id, None)
+
+        # 2. Move through 3 random points for more "activity"
         await self._set_hud("Jiggling Mouse", type="neutral")
 
         try:
