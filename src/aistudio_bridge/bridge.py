@@ -109,6 +109,99 @@ class ChromeBridge:
         else:
             await self._set_hud("Initializing...", type="neutral")
 
+    def _cleanup_browser(self):
+        """Clean up previous browser instances.
+
+        Note on Windows limitation:
+            Windows currently lacks a safe equivalent to `pkill -f --user-data-dir`.
+            This implementation intentionally avoids terminating unrelated Chrome processes.
+            Future work may identify orphaned bridge instances by inspecting command-line
+            arguments or parent process metadata.
+        """
+        if os.name == "nt":
+            if self.chrome_proc and self.chrome_proc.poll() is None:
+                logger.info("Stopping previous Chrome process...")
+                try:
+                    self.chrome_proc.terminate()
+                except Exception as e:
+                    logger.debug("Chrome termination ignored: %s", e)
+                try:
+                    self.chrome_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        self.chrome_proc.kill()
+                    except Exception as e:
+                        logger.debug("Chrome kill ignored: %s", e)
+                except Exception as e:
+                    logger.debug("Chrome wait ignored: %s", e)
+        else:
+            try:
+                subprocess.run(
+                    [
+                        "pkill",
+                        "-9",
+                        "-f",
+                        f"--user-data-dir={self.profile_dir}",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except FileNotFoundError:
+                logger.warning("pkill not available; skipping browser cleanup")
+
+    def _launch_browser(self, flags):
+        kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["preexec_fn"] = os.setsid
+
+        return subprocess.Popen(
+            [self.chrome_binary] + flags,
+            **kwargs,
+        )
+
+    def _terminate_browser(self):
+        if not self.chrome_proc:
+            return
+
+        if self.chrome_proc.poll() is not None:
+            self.chrome_proc = None
+            return
+
+        logger.info(f"Stopping Chrome process {self.chrome_proc.pid}")
+
+        try:
+            if os.name == "nt":
+                try:
+                    self.chrome_proc.terminate()
+                except Exception as e:
+                    logger.debug("Chrome termination ignored: %s", e)
+                try:
+                    self.chrome_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        self.chrome_proc.kill()
+                    except Exception as e:
+                        logger.debug("Chrome kill ignored: %s", e)
+                except Exception as e:
+                    logger.debug("Chrome wait ignored: %s", e)
+            else:
+                try:
+                    os.killpg(
+                        os.getpgid(self.chrome_proc.pid),
+                        signal.SIGKILL,
+                    )
+                except Exception as e:
+                    logger.debug("Chrome process group kill ignored: %s", e)
+        finally:
+            self.chrome_proc = None
+
     async def launch(self):
         attempt = 0
         while True:
@@ -124,7 +217,7 @@ class ChromeBridge:
     async def _do_launch(self):
         logger.info(f"Bootstrapping bridge for: {self.app_id}")
         logger.info("Cleaning up existing bridge instances...")
-        subprocess.run(["pkill", "-9", "-f", f"--user-data-dir={self.profile_dir}"], stderr=subprocess.DEVNULL)
+        self._cleanup_browser()
         await asyncio.sleep(2)
 
         flags = [
@@ -138,9 +231,7 @@ class ChromeBridge:
 
         logger.info(f"Launching Chrome from: {self.chrome_binary}")
         try:
-            self.chrome_proc = subprocess.Popen(
-                [self.chrome_binary] + flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid
-            )
+            self.chrome_proc = self._launch_browser(flags)
         except Exception as e:
             logger.error(f"FAILED TO LAUNCH CHROME: {e}")
             raise
@@ -557,13 +648,7 @@ class ChromeBridge:
             await self._set_hud("Hard Recovery...", type="recovery")
 
             # 1. Atomic Termination
-            if self.chrome_proc:
-                logger.info(f"Terminating process group: {self.chrome_proc.pid}")
-                try:
-                    os.killpg(os.getpgid(self.chrome_proc.pid), signal.SIGKILL)
-                except Exception:
-                    pass
-                self.chrome_proc = None
+            self._terminate_browser()
 
             if self.ws:
                 try:
